@@ -1,0 +1,220 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>renderer test</title>
+<style>
+  html, body { margin: 0; background: #000; height: 100%; overflow: hidden; touch-action: none; }
+  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+  #info { position: fixed; left: 4px; top: 4px; color: #ffae1a; font: 11px monospace; white-space: pre; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="info"></div>
+<script type="module">
+// Renderer test page.
+//   ?mode=mock            mock world and stand-in assets (default)
+//   ?mode=real&level=0    real textures, sprites and level (needs the other modules)
+//   ?assets=real          real textures and sprites on the mock world
+//   ?emu=1                emulate 16-bit mediump texture coordinates
+//   ?h=400                internal height
+//   ?live=1               fly the camera around with rAF (arrow keys / drag to steer)
+// Scripts drive it through window.T (see tools/test-render.mjs).
+
+import { createRenderer } from '../src/render/renderer.js';
+import { EYE_HEIGHT, WEAPON_IDS } from '../src/config.js';
+import * as mock from './test-render.mock.js';
+
+const q = new URLSearchParams(location.search);
+const mode = q.get('mode') || 'mock';
+const canvas = document.getElementById('gl');
+const T = window.T = { ready: false, error: null, mode };
+
+try {
+  let textures, sprites, world, views, sceneSprites, game = null;
+  if (mode === 'real' || q.get('assets') === 'real') {
+    textures = (await import('../src/assets/textures.js')).buildTextures();
+    sprites = (await import('../src/assets/sprites.js')).buildSprites();
+  } else {
+    textures = mock.mockTextures();
+    sprites = mock.mockSprites();
+  }
+  if (mode === 'real') {
+    const real = await import('./test-render.real.js');
+    ({ world, views, sprites: sceneSprites, game } = await real.loadLevel(Number(q.get('level') || 0)));
+  } else {
+    world = mock.buildWorld();
+    views = mock.MOCK_VIEWS;
+    sceneSprites = mock.MOCK_SPRITES;
+  }
+
+  const renderer = createRenderer(canvas, { textures, sprites }, { emulateMediump: q.get('emu') === '1' });
+  const gl = renderer.gl;
+  renderer.setWorld(world);
+  if (q.get('h')) renderer.setQuality(Number(q.get('h')));
+  const fit = () => renderer.resize(innerWidth, innerHeight);
+  addEventListener('resize', fit);
+  fit();
+
+  const scene = {
+    cam: { x: 0, y: 0, z: 0, yaw: 0 },
+    sprites: sceneSprites,
+    weapon: null,
+    extraLight: 0,
+    time: 0,
+  };
+  const apply = (v) => {
+    Object.assign(scene.cam, v.cam);
+    scene.sprites = v.sprites || sceneSprites;
+    scene.weapon = v.weapon || null;
+    scene.extraLight = v.extraLight || 0;
+    scene.time = v.time || 0;
+  };
+
+  Object.assign(T, {
+    world, views, renderer, scene, textures, sprites, game,
+    names: views.map((v) => v.name),
+    size: () => [canvas.width, canvas.height],
+    glInfo() {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      return {
+        renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+        depthBits: gl.getParameter(gl.DEPTH_BITS),
+        highpFragment: gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT).precision,
+        mediumpFragment: gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT).precision,
+      };
+    },
+    // Renders one view (by name, or a { cam, sprites, weapon, extraLight, time } object) and
+    // returns the internal frame as a PNG data URL.
+    shot(v, over = {}) {
+      const base = typeof v === 'string' ? views.find((x) => x.name === v) : v;
+      if (!base) throw new Error(`no view ${v}`);
+      apply({ ...base, ...over, cam: { ...base.cam, ...(over.cam || {}) } });
+      renderer.render(scene);
+      const err = gl.getError();
+      if (err) throw new Error(`gl error 0x${err.toString(16)}`);
+      return canvas.toDataURL('image/png');
+    },
+    cell: (cx, cy) => world.cell(cx, cy),
+    setDoor: (cx, cy, open) => mock.setDoor(world.cell(cx, cy), open),
+    setLift: (cx, cy, t) => mock.setLift(world.cell(cx, cy), t),
+    // Lowers or restores the walls around the sky cells so more or less sky shows.
+    setSkyHeight(h) {
+      for (const c of world.cells) if (c.ct === 'sky') c.ceil = h == null ? c.ceil0 : c.floor + h;
+      world.version++;
+    },
+    setWall(cx, cy, tex) {
+      world.cell(cx, cy).wall = tex;
+      world.version++;
+    },
+    weapon: (id, frame = 'idle', dx = 0, dy = 0, light = 0.8) => ({ frame: `wp_${id}_${frame}`, dx, dy, light }),
+    // Average cost of render(): JS only, and with a readPixels that waits for the GPU.
+    bench(v, frames = 200) {
+      apply(typeof v === 'string' ? views.find((x) => x.name === v) : v);
+      const px = new Uint8Array(4);
+      for (let i = 0; i < 20; i++) renderer.render(scene);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      let t0 = performance.now();
+      for (let i = 0; i < frames; i++) {
+        scene.time = i / 60;
+        scene.cam.yaw += 0.01;
+        renderer.render(scene);
+      }
+      const js = (performance.now() - t0) / frames;
+      t0 = performance.now();
+      for (let i = 0; i < frames; i++) {
+        scene.time = i / 60;
+        scene.cam.yaw += 0.01;
+        renderer.render(scene);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      }
+      const sync = (performance.now() - t0) / frames;
+      return { js, sync, frames };
+    },
+    // Runs rAF for a while with a turning camera and reports the frame interval.
+    raf(v, seconds = 2) {
+      apply(typeof v === 'string' ? views.find((x) => x.name === v) : v);
+      return new Promise((resolve) => {
+        const times = [];
+        let cpu = 0;
+        const start = performance.now();
+        const tick = (now) => {
+          times.push(now);
+          scene.time = (now - start) / 1000;
+          scene.cam.yaw += 0.02;
+          const t0 = performance.now();
+          renderer.render(scene);
+          cpu += performance.now() - t0;
+          if (now - start < seconds * 1000) requestAnimationFrame(tick);
+          else {
+            const d = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
+            resolve({
+              frames: d.length, median: d[d.length >> 1], p95: d[Math.floor(d.length * 0.95)],
+              max: d[d.length - 1], renderMs: cpu / times.length,
+            });
+          }
+        };
+        requestAnimationFrame(tick);
+      });
+    },
+    loseContext() {
+      const ext = gl.getExtension('WEBGL_lose_context');
+      return new Promise((resolve) => {
+        canvas.addEventListener('webglcontextrestored', () => setTimeout(resolve, 0), { once: true });
+        canvas.addEventListener('webglcontextlost', () => setTimeout(() => ext.restoreContext(), 50), { once: true });
+        ext.loseContext();
+      });
+    },
+  });
+
+  if (q.get('live') === '1') {
+    const info = document.getElementById('info');
+    const cam = { ...views[Number(q.get('view') || 0)].cam };
+    const keys = new Set();
+    addEventListener('keydown', (e) => keys.add(e.key));
+    addEventListener('keyup', (e) => keys.delete(e.key));
+    let last = performance.now(), acc = 0, n = 0;
+    scene.weapon = T.weapon(WEAPON_IDS[2]);
+    const tick = (now) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (keys.has('ArrowLeft')) cam.yaw -= 2 * dt;
+      if (keys.has('ArrowRight')) cam.yaw += 2 * dt;
+      const move = (keys.has('ArrowUp') ? 1 : 0) - (keys.has('ArrowDown') ? 1 : 0);
+      const nx = cam.x + Math.cos(cam.yaw) * move * 3 * dt, ny = cam.y + Math.sin(cam.yaw) * move * 3 * dt;
+      const c = world.cell(Math.floor(nx), Math.floor(ny));
+      if (!c.solid) {
+        cam.x = nx;
+        cam.y = ny;
+        cam.z = c.floor + EYE_HEIGHT;
+      }
+      if (mode !== 'real') {
+        const wave = 0.5 + 0.5 * Math.sin(now / 700);
+        for (const m of world.movers) {
+          if (m.door) mock.setDoor(m, wave);
+          else mock.setLift(m, wave);
+        }
+      }
+      Object.assign(scene.cam, cam);
+      scene.time = now / 1000;
+      const t0 = performance.now();
+      renderer.render(scene);
+      acc += performance.now() - t0;
+      if (++n === 60) {
+        info.textContent = `${canvas.width}x${canvas.height}  render ${(acc / n).toFixed(2)} ms`;
+        acc = n = 0;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+  T.ready = true;
+} catch (e) {
+  T.error = e.stack || String(e);
+  console.error(e);
+}
+</script>
+</body>
+</html>

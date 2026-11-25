@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>input test</title>
+<!--
+  Stand-in page for src/input.js. Query parameters:
+    live=1   run a frame loop that applies sample() to a mock scene (open this on a phone)
+    safe=1   pretend to have iPhone safe-area insets and draw the notch / home-indicator zones
+    left=1   left-handed layout
+-->
+<style>
+  :root { --st: env(safe-area-inset-top, 0px); --sr: env(safe-area-inset-right, 0px);
+          --sb: env(safe-area-inset-bottom, 0px); --sl: env(safe-area-inset-left, 0px); }
+  html, body { margin: 0; position: fixed; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden;
+               background: #0b0a09; color: #ffae1a; font: 11px/1.3 ui-monospace, Menlo, Consolas, monospace;
+               touch-action: none; -webkit-user-select: none; user-select: none; }
+  #app { position: fixed; left: 0; top: 0; right: 0; bottom: 0; }
+  #view { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  @media (orientation: portrait) {
+    #view { top: var(--st); height: 75vw; }
+  }
+  #gl { display: block; width: 100%; height: 100%; }
+  #hud { position: absolute; left: 0; top: 0; right: 0; bottom: 0; pointer-events: none; }
+  /* Same arrangement as style.css: the minimap stacks above #touch, the top-left corner
+     (68 px past the inset) is left free for PAUSE. */
+  #minimap { position: absolute; z-index: 2; right: calc(var(--sr) + 10px); top: 10px; width: 88px; height: 88px;
+             border: 1px solid rgba(255, 174, 26, .6); background: rgba(0, 0, 0, .35); pointer-events: auto; }
+  #readout { position: absolute; left: calc(var(--sl) + 68px); top: 10px; white-space: pre; opacity: .8;
+             border-left: 3px solid #ffae1a; padding: 4px 8px; background: rgba(10, 8, 5, .6); }
+  #touch { position: absolute; left: 0; top: 0; right: 0; bottom: 0; z-index: 1; }
+  #menu { position: absolute; left: 0; top: 0; right: 0; bottom: 0; z-index: 3; display: none; }
+  #unsafe { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 5; pointer-events: none; display: none; }
+  #unsafe div { position: absolute; background: rgba(255, 40, 40, .16); }
+  #unsafe i { position: absolute; left: 50%; bottom: 8px; width: 140px; height: 5px; margin-left: -70px;
+              border-radius: 3px; background: rgba(255, 255, 255, .7); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <canvas id="gl"></canvas>
+    <div id="hud"><div id="minimap"></div><div id="readout"></div></div>
+  </div>
+  <div id="touch"></div>
+  <div id="menu"></div>
+</div>
+<div id="unsafe"><div id="u-t"></div><div id="u-r"></div><div id="u-b"></div><div id="u-l"></div><i></i></div>
+<script type="module">
+import { createInput } from '../src/input.js';
+
+const params = new URLSearchParams(location.search);
+const canvas = document.getElementById('gl');
+const readout = document.getElementById('readout');
+const input = createInput(document.getElementById('touch'), { leftHanded: params.has('left') });
+
+// Records whether the page's touch events ended up default-prevented, and HUD clicks.
+const log = { prevented: {}, mapClicks: 0 };
+for (const type of ['touchstart', 'touchmove', 'touchend']) {
+  window.addEventListener(type, (e) => { log.prevented[type] = e.defaultPrevented; });
+}
+document.getElementById('minimap').addEventListener('pointerdown', () => { log.mapClicks++; });
+
+function applySafeArea() {
+  if (!params.has('safe')) return;
+  const portrait = innerHeight > innerWidth;
+  const s = portrait ? { t: 47, r: 0, b: 34, l: 0 } : { t: 0, r: 47, b: 21, l: 47 };
+  const root = document.documentElement.style;
+  root.setProperty('--st', `${s.t}px`);
+  root.setProperty('--sr', `${s.r}px`);
+  root.setProperty('--sb', `${s.b}px`);
+  root.setProperty('--sl', `${s.l}px`);
+  document.querySelector('.ti-layer').style.padding = `${s.t}px ${s.r}px ${s.b}px ${s.l}px`;
+  document.getElementById('unsafe').style.display = 'block';
+  const set = (id, css) => { document.getElementById(id).style.cssText = css; };
+  set('u-t', `left:0;top:0;right:0;height:${s.t}px`);
+  set('u-b', `left:0;bottom:0;right:0;height:${s.b}px`);
+  set('u-l', `left:0;top:0;bottom:0;width:${s.l}px`);
+  set('u-r', `right:0;top:0;bottom:0;width:${s.r}px`);
+  window.dispatchEvent(new Event('resize'));
+}
+applySafeArea();
+window.addEventListener('orientationchange', applySafeArea);
+
+// Mock scene: pillars on a circle around the player, projected with the game's 58 degree FOV.
+const state = { x: 0, y: 0, yaw: 0, fire: 0, last: null };
+function draw() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.round(canvas.clientWidth * dpr);
+  const h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const g = canvas.getContext('2d');
+  const sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#1b1612');
+  sky.addColorStop(0.5, '#3a2a1a');
+  sky.addColorStop(0.5, '#2a2622');
+  sky.addColorStop(1, '#0e0d0c');
+  g.fillStyle = sky;
+  g.fillRect(0, 0, w, h);
+  const focal = (h / 2) / Math.tan((58 * Math.PI) / 360);
+  const pillars = [];
+  for (let i = 0; i < 28; i++) {
+    const a = (i / 28) * Math.PI * 2;
+    const r = 5 + (i % 3) * 2.5;
+    const dx = Math.cos(a) * r - state.x;
+    const dy = Math.sin(a) * r - state.y;
+    const fwd = dx * Math.cos(state.yaw) + dy * Math.sin(state.yaw);
+    const side = -dx * Math.sin(state.yaw) + dy * Math.cos(state.yaw);
+    if (fwd > 0.3) pillars.push({ fwd, side, i });
+  }
+  pillars.sort((p, q) => q.fwd - p.fwd);
+  for (const p of pillars) {
+    const sx = w / 2 + (p.side / p.fwd) * focal;
+    const half = (0.75 / p.fwd) * focal;
+    const shade = Math.max(0.15, 1 - p.fwd / 14);
+    g.fillStyle = `hsl(${20 + (p.i * 37) % 40}, 55%, ${Math.round(38 * shade)}%)`;
+    g.fillRect(sx - half * 0.35, h / 2 - half, half * 0.7, half * 2);
+  }
+  if (state.fire) {
+    g.fillStyle = 'rgba(255, 220, 140, .85)';
+    g.fillRect(w / 2 - 14 * dpr, h - 70 * dpr, 28 * dpr, 70 * dpr);
+  }
+  g.fillStyle = '#ffae1a';
+  g.fillRect(w / 2 - 1, h / 2 - 6 * dpr, 2, 12 * dpr);
+  g.fillRect(w / 2 - 6 * dpr, h / 2 - 1, 12 * dpr, 2);
+}
+
+const counts = { use: 0, next: 0, pause: 0, map: 0 };
+function frame() {
+  const s = input.sample();
+  state.yaw += s.turn;
+  const speed = 3.4 / 60;
+  state.x += (Math.cos(state.yaw) * s.moveY - Math.sin(state.yaw) * s.moveX) * speed;
+  state.y += (Math.sin(state.yaw) * s.moveY + Math.cos(state.yaw) * s.moveX) * speed;
+  state.fire = s.fire ? 1 : 0;
+  if (s.use) counts.use++;
+  if (s.weaponNext) counts.next++;
+  if (s.pause) counts.pause++;
+  if (s.map) counts.map++;
+  readout.textContent = `move ${s.moveX.toFixed(2)} ${s.moveY.toFixed(2)}  yaw ${state.yaw.toFixed(2)}\n`
+    + `fire ${state.fire}  use ${counts.use}  next ${counts.next}  pause ${counts.pause}  map ${counts.map + log.mapClicks}`
+    + `  touch ${s.isTouch}`;
+  draw();
+  requestAnimationFrame(frame);
+}
+
+window.__input = input;
+window.__log = log;
+window.__state = state;
+window.__draw = draw;
+window.__applySafeArea = applySafeArea;
+
+if (params.has('live')) {
+  input.setEnabled(true);
+  requestAnimationFrame(frame);
+} else {
+  readout.textContent = 'HEALTH 100  ARMOR 50';
+  draw();
+}
+</script>
+</body>
+</html>

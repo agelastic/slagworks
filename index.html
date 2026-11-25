@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Slagworks">
+<meta name="theme-color" content="#0b0906">
+<meta name="color-scheme" content="dark">
+<meta name="format-detection" content="telephone=no">
+<meta name="description" content="SLAGWORKS: a retro first-person shooter set in a derelict orbital foundry. Runs in the browser, built for iPhone Safari.">
+<title>SLAGWORKS</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%230b0906'/%3E%3Cpath fill='%23ffae1a' d='M21.2 8H47v7.8H24.8V23H17V12.2z M17 25.1h30v15h-7.8v-7.2H17z M17 42.2h30v3.6L42.8 50H17z'/%3E%3Crect x='17' y='54' width='30' height='3' fill='%23ff5a1f'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <canvas id="gl"></canvas>
+    <div id="hud"></div>
+  </div>
+  <div id="touch"></div>
+  <div id="menu"><div class="boot">SLAGWORKS<div class="bar"><i></i></div></div></div>
+</div>
+<noscript><p class="noscript">SLAGWORKS needs JavaScript to run.</p></noscript>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

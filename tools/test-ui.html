@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>SLAGWORKS ui test</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+  /* Stand-ins for the controls input.js will draw inside #touch. */
+  .mock { position: absolute; box-sizing: border-box; border: 2px solid rgba(255, 255, 255, 0.55); border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12); color: #fff; font: 700 11px/1 ui-monospace, Menlo, monospace;
+    display: flex; align-items: center; justify-content: center; }
+  .mock-pause { left: calc(var(--sal) + 10px); top: calc(var(--sat) + 10px); width: 46px; height: 46px; border-radius: 8px; }
+  .mock-stick { left: calc(var(--sal) + 38px); bottom: calc(var(--sab) + 34px); width: 124px; height: 124px; }
+  .mock-fire { right: calc(var(--sar) + 26px); bottom: calc(var(--sab) + 30px); width: 88px; height: 88px; }
+  .mock-use { right: calc(var(--sar) + 130px); bottom: calc(var(--sab) + 26px); width: 58px; height: 58px; }
+  .mock-next { right: calc(var(--sar) + 34px); bottom: calc(var(--sab) + 134px); width: 58px; height: 58px; }
+</style>
+<script>
+  // Simulated iPhone safe-area insets (?safe) and the tuning stand-in (unless ?real).
+  const query = new URLSearchParams(location.search);
+  if (query.has('safe')) {
+    const land = innerWidth > innerHeight;
+    const root = document.documentElement.style;
+    root.setProperty('--sat', land ? '0px' : '47px');
+    root.setProperty('--sal', land ? '47px' : '0px');
+    root.setProperty('--sar', land ? '47px' : '0px');
+    root.setProperty('--sab', land ? '21px' : '34px');
+  }
+  if (!query.has('real')) {
+    const map = document.createElement('script');
+    map.type = 'importmap';
+    map.textContent = JSON.stringify({
+      imports: { [new URL('../src/game/tuning.js', location.href).href]: new URL('./test-ui.tuning.js', location.href).href },
+    });
+    document.currentScript.after(map);
+  }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <canvas id="gl"></canvas>
+    <div id="hud"></div>
+  </div>
+  <div id="touch"></div>
+  <div id="menu"></div>
+</div>
+<script type="module">
+import { createHud } from '../src/ui/hud.js';
+import { createMenus, loadSettings, loadSave, saveSave, clearSave } from '../src/ui/menus.js';
+
+const query = new URLSearchParams(location.search);
+
+// ------------------------------------------------------------ mock world
+
+const MAP = [
+  '##########################',
+  '#......#........#........#',
+  '#..P...D........a...hh...X',
+  '#......#..~~~~..#...hh...#',
+  '###t####..~~~~..####c#####',
+  '#......#........#........#',
+  '#..LL..s........D..%%%...#',
+  '#..LL..#........#..%%%...S',
+  '#......###m######........#',
+  '#......#........#........#',
+  '########........##########',
+  '       ##########         ',
+];
+
+function makeWorld() {
+  const h = MAP.length, w = MAP[0].length;
+  const cells = [];
+  for (let cy = 0; cy < h; cy++) {
+    for (let cx = 0; cx < w; cx++) {
+      const ch = MAP[cy][cx];
+      const solid = ch === '#' || ch === ' ' || ch === 'X' || ch === 'S';
+      const door = { D: {}, a: { key: 'amber' }, c: { key: 'cyan' }, m: { key: 'magenta' }, t: { tag: 3 }, s: { secret: true } }[ch];
+      cells.push({
+        cx, cy, solid,
+        wall: solid ? 'w_plate' : null,
+        floor: ch === 'h' ? 0.8 : 0, ceil: 1.5, floor0: 0, ceil0: 1.5,
+        ft: ch === '~' ? 'f_slag' : ch === '%' ? 'f_coolant' : 'f_plate', ct: 'c_panel', wt: 'w_plate',
+        light: 0.8, flicker: 0, damage: ch === '~' || ch === '%' ? 10 : 0,
+        door: door ? { tex: 'w_door', key: null, tag: 0, secret: false, open: 0, ...door } : null,
+        lift: ch === 'L' ? { low: 0, high: 1.5, tag: 0 } : null,
+        mover: Boolean(door) || ch === 'L', dynamic: false,
+        secret: false, trigger: 0, exit: ch === 'X',
+        switch: ch === 'S' ? { tag: 3, on: false } : null,
+        seen: cx < 22 || cy < 4,
+      });
+    }
+  }
+  const outside = { solid: true, seen: false, door: null, lift: null };
+  return {
+    w, h, cells, version: 0,
+    movers: cells.filter((c) => c.mover),
+    cell: (cx, cy) => (cx < 0 || cy < 0 || cx >= w || cy >= h ? outside : cells[cy * w + cx]),
+  };
+}
+
+const game = {
+  state: 'playing',
+  levelIndex: 0,
+  level: { id: 'l1', name: 'Loading Dock', par: 150 },
+  world: makeWorld(),
+  player: {
+    x: 10.5, y: 5.5, z: 0, yaw: -0.6, eyeZ: 0.62, health: 100, armor: 50,
+    ammo: { rivets: 50, shells: 8, canisters: 2 },
+    weapons: [true, true, true, false, false], weapon: 1,
+    keys: { amber: true, cyan: false, magenta: true },
+  },
+  stats: { kills: 3, totalKills: 14, items: 2, totalItems: 9, secrets: 0, totalSecrets: 1, time: 83.2 },
+  events: [],
+};
+
+// ------------------------------------------------------------ mock 3D view
+
+function paintView() {
+  const canvas = document.getElementById('gl');
+  const w = canvas.width = 426, h = canvas.height = 240;
+  const g = canvas.getContext('2d');
+  const sky = g.createLinearGradient(0, 0, 0, h / 2);
+  sky.addColorStop(0, '#5a5148'); sky.addColorStop(1, '#1c1814');
+  g.fillStyle = sky; g.fillRect(0, 0, w, h / 2);
+  const floor = g.createLinearGradient(0, h / 2, 0, h);
+  floor.addColorStop(0, '#15110d'); floor.addColorStop(1, '#6b5a44');
+  g.fillStyle = floor; g.fillRect(0, h / 2, w, h / 2);
+  g.fillStyle = '#7d6a55'; g.fillRect(0, 40, 90, 160);          // near wall, left
+  g.fillStyle = '#e8e4da'; g.fillRect(0, 0, 150, 34);           // bright ceiling light, top-left
+  g.fillStyle = '#3a4a52'; g.fillRect(150, 82, 120, 76);        // far wall
+  g.fillStyle = '#ff8a20'; g.fillRect(300, 60, 126, 180);       // furnace glow, right
+  g.fillStyle = '#fff2c0'; g.fillRect(330, 150, 96, 90);        // white-hot patch, bottom-right
+  g.fillStyle = '#c9c2b4'; g.fillRect(0, 196, 120, 44);         // pale floor, bottom-left
+  g.fillStyle = '#22262a'; g.fillRect(180, 170, 70, 70);        // weapon stand-in
+}
+
+document.getElementById('touch').innerHTML = `
+  <div class="mock mock-pause">II</div>
+  <div class="mock mock-stick">MOVE</div>
+  <div class="mock mock-fire">FIRE</div>
+  <div class="mock mock-use">USE</div>
+  <div class="mock mock-next">NEXT</div>`;
+
+// ------------------------------------------------------------ wiring
+
+const calls = [];
+const log = (name) => (...args) => calls.push([name, ...args]);
+const hud = createHud(document.getElementById('hud'));
+const menus = createMenus(document.getElementById('menu'), {
+  onNewGame: log('onNewGame'), onContinue: log('onContinue'), onResume: log('onResume'),
+  onRestartLevel: log('onRestartLevel'), onQuit: log('onQuit'), onNextLevel: log('onNextLevel'),
+  onSettings: log('onSettings'), onSound: log('onSound'),
+});
+hud.onMapToggle(log('onMapToggle'));
+menus.hide();
+paintView();
+
+let running = true;
+function frame() {
+  if (running) hud.update(game);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+const SAMPLE = {
+  intermission: { name: 'Loading Dock', par: 150, stats: { kills: 12, totalKills: 14, items: 9, totalItems: 9, secrets: 0, totalSecrets: 1, time: 131 } },
+  victory: { difficulty: 1, stats: { kills: 87, totalKills: 96, items: 41, totalItems: 52, secrets: 3, totalSecrets: 5, time: 1124 } },
+};
+
+window.ui = {
+  hud, menus, game, calls, loadSettings, loadSave, saveSave, clearSave,
+  show: (screen, data) => menus.show(screen, data ?? SAMPLE[screen]),
+  pause: (stop) => { running = !stop; },
+};
+
+if (query.has('screen')) window.ui.show(query.get('screen'));
+window.uiReady = true;
+</script>
+</body>
+</html>

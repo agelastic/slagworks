@@ -1,0 +1,16 @@
+{
+  "name": "slagworks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Retro first-person shooter for mobile Safari and desktop browsers. No build step.",
+  "scripts": {
+    "serve": "node tools/serve.mjs 8080",
+    "validate": "node tools/validate-levels.mjs",
+    "sim": "node tools/sim-test.mjs",
+    "test": "node tools/validate-levels.mjs && node tools/sim-test.mjs && node tools/browser-test.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

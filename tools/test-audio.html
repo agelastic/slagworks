@@ -1,0 +1,259 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>audio check</title>
+<style>
+  html, body { margin: 0; background: #111; color: #e8e0c0; font: 14px monospace; }
+  button { font: inherit; margin: 12px; padding: 8px 12px; }
+</style>
+</head>
+<body>
+<!-- Driven by tools/test-audio.mjs. Opened by hand it is a small sound board. -->
+<div id="board"></div>
+<script type="module">
+import { SOUND_IDS, MUSIC_TRACK_COUNT } from '../src/config.js';
+
+// Count live AudioContexts and tap their output so the realtime checks can measure it.
+// OfflineAudioContext is a separate constructor and is not counted.
+const live = { made: [], resumes: 0, fakeState: null };
+const RealAC = window.AudioContext || window.webkitAudioContext;
+class TapContext extends RealAC {
+  constructor(o) {
+    super(o);
+    live.made.push(this);
+  }
+  get destination() {
+    if (!this.tap) {
+      this.tap = this.createGain();
+      this.meter = this.createAnalyser();
+      this.meter.fftSize = 2048;
+      this.tap.connect(this.meter);
+      this.meter.connect(super.destination);
+    }
+    return this.tap;
+  }
+  get state() {
+    return live.fakeState || super.state;
+  }
+  resume() {
+    live.resumes++;
+    return super.resume();
+  }
+}
+window.AudioContext = TapContext;
+window.webkitAudioContext = TapContext;
+// Chrome has no audio session API; give unlock() one to set.
+if (!navigator.audioSession) Object.defineProperty(navigator, 'audioSession', { value: { type: 'auto' }, configurable: true });
+
+const { createAudio, synth } = await import('../src/audio.js');
+
+const RATE = 44100;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The compressor starts up in a state that swallows the first tens of milliseconds, which a
+// running game never sees. Everything is played after a lead-in and the lead-in is cut off.
+const LEAD = 0.25;
+
+// Runs setup(audio) against a fresh offline context and renders `seconds` of stereo output.
+async function offline(seconds, setup) {
+  const ctx = new OfflineAudioContext(2, Math.ceil((LEAD + seconds) * RATE), RATE);
+  const audio = createAudio({ context: ctx });
+  let from = 0;
+  ctx.suspend(LEAD).then(() => {
+    from = Math.round(ctx.currentTime * RATE);
+    audio.unlock();
+    audio.setListener(0, 0, 0);
+    setup(audio);
+    audio._scheduleMusic(ctx.currentTime + seconds);
+    ctx.resume();
+  });
+  const buf = await ctx.startRendering();
+  return { l: buf.getChannelData(0).subarray(from), r: buf.getChannelData(1).subarray(from) };
+}
+
+// RMS of half-overlapping windows of the mono mix, from `from` seconds on.
+function windows({ l, r }, win, from = 0) {
+  const n = Math.round(win * RATE);
+  const out = [];
+  for (let at = Math.round(from * RATE); at + n <= l.length; at += n >> 1) {
+    let s = 0;
+    for (let i = at; i < at + n; i++) s += ((l[i] + r[i]) / 2) ** 2;
+    out.push(Math.sqrt(s / n));
+  }
+  return out;
+}
+
+function stats(pcm) {
+  const { l, r } = pcm;
+  let peak = 0, nan = 0, sl = 0, sr = 0;
+  for (let i = 0; i < l.length; i++) {
+    if (!Number.isFinite(l[i]) || !Number.isFinite(r[i])) nan++;
+    peak = Math.max(peak, Math.abs(l[i]), Math.abs(r[i]));
+    sl += l[i] * l[i];
+    sr += r[i] * r[i];
+  }
+  return {
+    peak, nan,
+    rms: Math.sqrt((sl + sr) / (2 * l.length)),
+    l: Math.sqrt(sl / l.length), r: Math.sqrt(sr / l.length),
+    loud: Math.max(0, ...windows(pcm, 0.05)),
+  };
+}
+
+const lengths = new Map();
+const soundLen = (id) => {
+  if (!lengths.has(id)) {
+    const { data, rate } = synth(id);
+    lengths.set(id, data.length / rate);
+  }
+  return lengths.get(id);
+};
+
+// One sound, not positional, default volumes, through the whole graph.
+window.renderSound = async (id) => stats(await offline(soundLen(id) + 0.3, (a) => a.play(id)));
+
+window.renderMusic = async (track, seconds) => {
+  const pcm = await offline(seconds, (a) => a.setMusic(track));
+  const s = stats(pcm);
+  const wins = windows(pcm, 0.5, 1.5);   // after the fade-in
+  return { peak: s.peak, nan: s.nan, rms: s.rms, rmsL: s.l, rmsR: s.r, minWin: Math.min(...wins), maxWin: Math.max(...wins) };
+};
+
+window.renderMusicPcm = async (track, seconds) => {
+  const { l, r } = await offline(seconds, (a) => a.setMusic(track));
+  return [Array.from(l), Array.from(r)];
+};
+
+window.miscChecks = async () => {
+  const one = async (setup, seconds = 0.6) => stats(await offline(seconds, setup));
+  const at = (x, y) => one((a) => a.play('pickup_item', { x, y }));
+  const out = { constructed: live.made.length };
+
+  out.silentMusic = await one((a) => { a.setMusicVolume(0); a.setMusic(0); }, 3);
+  out.nullMusic = await one((a) => { a.setMusic(1); a.setMusic(null); }, 3);
+
+  // Listener at the origin facing +x: +y is to the right.
+  out.right = await at(0, 3);
+  out.left = await at(0, -3);
+  out.ahead = await at(3, 0);
+  out.far = await at(25, 0);
+  out.near = await at(1, 0);
+  out.mid = await at(6, 0);
+  out.distant = await at(15, 0);
+  // Turned to face +y, a sound at +x is on the left.
+  out.turned = await one((a) => { a.setListener(0, 0, Math.PI / 2); a.play('pickup_item', { x: 3, y: 0 }); });
+  // Just off-centre must be as loud as dead centre, and a sound at the listener as loud as an
+  // unpanned one.
+  out.offCentre = await at(3, 0.01);
+  out.onListener = await at(0, 0);
+
+  out.once = await one((a) => a.play('rivet_fire'));
+  out.twice = await one((a) => { a.play('rivet_fire'); a.play('rivet_fire'); });
+  out.unknown = await one((a) => a.play('no_such_sound'));
+  out.volumeFull = await one((a) => a.play('pickup_item'));
+  out.volumeHalf = await one((a) => a.play('pickup_item', { volume: 0.5 }));
+  out.sfxZero = await one((a) => { a.setSfxVolume(0); a.play('explode'); });
+
+  // Worst case: everything at once at full volume over the loudest track.
+  out.stack = await one((a) => {
+    a.setSfxVolume(1);
+    a.setMusicVolume(1);
+    a.setMusic(3);
+    for (const id of SOUND_IDS) a.play(id);
+  }, 4.5);
+  for (const k of Object.keys(out)) {
+    if (typeof out[k] === 'object') for (const f of Object.keys(out[k])) out[k][f] = +out[k][f].toFixed(6);
+  }
+  return out;
+};
+
+// ---------------------------------------------------------------- live context
+
+// Everything here happens before any gesture and must not create a context.
+const audio = createAudio();
+audio.setListener(0, 0, 0);
+audio.play('menu_move');
+audio.play('door_open', { x: 2, y: 1 });
+audio.setMusic(0);          // stays pending until unlock()
+document.addEventListener('click', () => audio.unlock());
+
+const levelNow = () => {
+  const ctx = live.made[0];
+  const d = new Float32Array(ctx.meter.fftSize);
+  ctx.meter.getFloatTimeDomainData(d);
+  let s = 0;
+  for (const v of d) s += v * v;
+  return Math.sqrt(s / d.length);
+};
+
+// Samples the output level every 40 ms for `ms`.
+async function listen(ms) {
+  const out = [];
+  for (const end = performance.now() + ms; performance.now() < end;) {
+    out.push(levelNow());
+    await sleep(40);
+  }
+  return out;
+}
+const quiet = (levels) => levels.filter((v) => v < 0.002).length;
+
+// Call after a real click on the page.
+window.realtime = async () => {
+  const ctx = live.made[0];
+  const out = { constructedAfterUnlock: live.made.length, audioSession: navigator.audioSession.type };
+  for (let i = 0; i < 50 && ctx.state !== 'running'; i++) await sleep(20);
+  out.state = ctx.state;
+  out.sampleRate = ctx.sampleRate;
+
+  // Track 0 was requested before the unlock and starts on its own.
+  await sleep(1700);
+  out.musicQuiet = quiet(await listen(3000));
+  audio.setMusicVolume(0);
+  await sleep(300);
+  out.afterZero = Math.max(...await listen(300));
+
+  audio.play('scatter_fire');
+  out.sfxRms = Math.max(...await listen(400));
+
+  audio.suspend();
+  await sleep(200);
+  out.afterSuspend = ctx.state;
+  audio.resume();
+  await sleep(300);
+  out.afterResume = ctx.state;
+
+  audio.setMusicVolume(0.5);
+  await sleep(1700);
+  audio.setMusic(2);
+  out.crossfadeQuiet = quiet(await listen(2500));
+
+  // iOS reports 'interrupted' after a call or an app switch; the next gesture must resume.
+  live.fakeState = 'interrupted';
+  const before = live.resumes;
+  audio.play('explode');                                  // ignored while not running
+  document.dispatchEvent(new Event('touchend'));
+  out.interruptedResumes = live.resumes - before;
+  live.fakeState = null;
+  audio.setMusic(null);
+  return out;
+};
+
+// Sound board for listening by hand (not built under the test driver, whose click must hit nothing).
+if (!navigator.webdriver) {
+  const board = document.getElementById('board');
+  const button = (label, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = fn;
+    board.append(b);
+  };
+  for (let i = 0; i < MUSIC_TRACK_COUNT; i++) button(`music ${i}`, () => audio.setMusic(i));
+  button('music off', () => audio.setMusic(null));
+  for (const id of SOUND_IDS) button(id, () => audio.play(id));
+}
+
+window.ready = true;
+</script>
+</body>
+</html>

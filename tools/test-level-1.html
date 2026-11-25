@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{width:100vw;height:100vh;display:block;image-rendering:pixelated}</style>
+<canvas id="gl"></canvas>
+<script type="module">
+// Level 1 viewpoints for tools/test-level-1.mjs: window.T.view(x, y, yaw, z) renders one frame.
+import { buildTextures } from '../src/assets/textures.js';
+import { buildSprites } from '../src/assets/sprites.js';
+import { createRenderer } from '../src/render/renderer.js';
+import { Game } from '../src/game/game.js';
+import { build } from '../src/levels/build.js';
+import l1 from '../src/levels/l1.js';
+import { EYE_HEIGHT } from '../src/config.js';
+const T = window.T = { ready: false, error: null };
+try {
+  const level = build(l1);
+  const game = new Game({ levels: [level, level, level, level], difficulty: 1, seed: 1 });
+  game.loadLevel(0);
+  const renderer = createRenderer(document.getElementById('gl'), { textures: buildTextures(), sprites: buildSprites() });
+  renderer.setWorld(game.world);
+  renderer.resize(innerWidth, innerHeight);
+  T.view = (x, y, yaw, z) => {
+    const p = game.player;
+    p.x = x; p.y = y; p.yaw = yaw;
+    p.z = z ?? game.world.cell(Math.floor(x), Math.floor(y)).floor;
+    p.eyeZ = p.z + EYE_HEIGHT;
+    const scene = game.getScene();
+    scene.weapon = null;
+    renderer.render(scene);
+  };
+  T.ready = true;
+} catch (e) { T.error = String(e && e.stack || e); }
+</script>
